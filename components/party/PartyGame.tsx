@@ -5,7 +5,7 @@ import Avatar from "@/components/Avatar";
 import { useRoom, usePlayerId } from "./useRoom";
 import { EMOTES, GUARD_ACTS, PRIS_ACTS, G_WIN, P_WIN, awards, limitFor, verdict, type GuardAct, type PPlayer, type PrisAct, type Room } from "@/lib/party/engine";
 import { submitRun } from "@/lib/client-api";
-import { sfx } from "@/lib/sound";
+import { sfx, buzz } from "@/lib/sound";
 
 export default function PartyGame({ code, online }: { code: string; online: boolean }) {
   const id = usePlayerId();
@@ -35,7 +35,9 @@ function NameGate({ onName }: { onName: (n: string) => void }) {
 function useNow(ms = 250) { const [n, setN] = useState(Date.now()); useEffect(() => { const t = setInterval(() => setN(Date.now()), ms); return () => clearInterval(t); }, [ms]); return n; }
 
 function Table({ code, online, me, host }: { code: string; online: boolean; me: { id: string; name: string }; host: boolean }) {
-  const { room, status, skew, act, sendEmote, start, lobby } = useRoom({ code, me, host, online });
+  const { room, status, skew, isHost, act, sendEmote, start, lobby } = useRoom({ code, me, host, online });
+  useWakeLock(!!room && room.phase !== "lobby");
+  useEffect(() => { const g = !!room && room.phase !== "lobby"; document.body.classList.toggle("in-game", g); return () => document.body.classList.remove("in-game"); }, [room?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
   const now = useNow();
   const [target, setTarget] = useState<string | null>(null);
   const [sel, setSel] = useState<string | null>(null);
@@ -45,7 +47,7 @@ function Table({ code, online, me, host }: { code: string; online: boolean; me: 
   const submitted = useRef(false);
 
   const mine = room?.players.find((p) => p.id === me.id);
-  useEffect(() => { if (room && room.round !== lastRound.current && room.phase === "round") { lastRound.current = room.round; setSel(null); setTarget(null); sfx.whistle(); } }, [room?.round, room?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (room && room.round !== lastRound.current && room.phase === "round") { lastRound.current = room.round; setSel(null); setTarget(null); sfx.whistle(); buzz([40, 40, 40]); } }, [room?.round, room?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (room?.phase === "end" && mine && !submitted.current) {
       submitted.current = true; sfx.reveal();
@@ -56,7 +58,7 @@ function Table({ code, online, me, host }: { code: string; online: boolean; me: 
   }, [room?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (status === "error") return <Notice title="Couldn't connect" body="The room server didn't answer. Check your connection, or play a practice round against simulated players." />;
-  if (status === "host-gone") return <Notice title="The host left" body="This room closed when its host disconnected. Start a new room to keep playing." />;
+  if (status === "host-gone") return <Notice title="The room went quiet" body="The host and everyone who could take over have disconnected. Start a new room to keep playing." />;
   if (!room) return <p className="muted center">Waiting for the host to open the gate… <br /><small>Room {code}</small></p>;
 
   if (room.phase === "lobby") {
@@ -72,7 +74,7 @@ function Table({ code, online, me, host }: { code: string; online: boolean; me: 
           {Array.from({ length: Math.max(0, 6 - humans.length) }).map((_, i) => <div key={"b" + i} className="lobby-p sim"><div className="sim-dot">SIM</div><span>Simulated player</span></div>)}
         </div>
         <p className="muted">Roles are dealt at random when the host starts: about a third guards, the rest prisoners. Empty seats are filled by simulated players with their own personalities.</p>
-        {host ? (
+        {isHost ? (
           <div className="card">
             <div className="row2">
               <label className="field"><span>Nights</span><select value={rounds} onChange={(e) => setRounds(+e.target.value)}>{[3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
@@ -85,11 +87,19 @@ function Table({ code, online, me, host }: { code: string; online: boolean; me: 
     );
   }
 
-  if (room.phase === "end") return <EndScreen room={room} meId={me.id} host={host} onLobby={lobby} />;
+  if (room.phase === "end") return <EndScreen room={room} meId={me.id} host={isHost} onLobby={lobby} />;
 
-  if (!mine) return <Notice title="Game in progress" body="This room is mid-game. Ask the host to start a new round, or open another room." />;
+  const endsLocal = room.endsAt + (isHost ? 0 : skew);
+  if (!mine) return (
+    <div className="party">
+      <div className="watch-banner"><b>You&apos;re watching.</b> This game started before you joined. You&apos;ll be dealt in next round.</div>
+      <div className="p-top"><div><span className="kicker">Night {room.round} / {room.settings.rounds}</span><h2 className="display-3">{room.event?.title}</h2></div>{room.phase === "round" && <div className="p-timer">{Math.max(0, Math.ceil((endsLocal - now) / 1000))}</div>}</div>
+      <Dual room={room} />
+      <Block room={room} meId={me.id} />
+      <Log room={room} />
+    </div>
+  );
 
-  const endsLocal = room.endsAt + (host ? 0 : skew);
   const left = Math.max(0, Math.ceil((endsLocal - now) / 1000));
   const guard = mine.role === "guard";
   const used = (room.pending[me.id] || []).length;
@@ -109,10 +119,8 @@ function Table({ code, online, me, host }: { code: string; online: boolean; me: 
         <div><span className="kicker">Night {room.round} / {room.settings.rounds}</span><h2 className="display-3">{room.event?.title}</h2></div>
         {room.phase === "round" && <div className={`p-timer ${left <= 5 ? "hot" : ""}`}>{left}</div>}
       </div>
-      <div className="dual">
-        <div><span>Order</span><div className="hud-bar"><i style={{ width: `${room.order}%`, background: "var(--amber)" }} /><span className="hud-target" style={{ left: `${G_WIN}%` }} /></div><b>{room.order}</b></div>
-        <div><span>Solidarity</span><div className="hud-bar"><i style={{ width: `${room.solidarity}%`, background: "var(--orange)" }} /><span className="hud-target" style={{ left: `${P_WIN}%` }} /></div><b>{room.solidarity}</b></div>
-      </div>
+      {isHost && online && <div className="host-banner">You&apos;re hosting. Keep this screen open; if you leave, another player takes over.</div>}
+      <Dual room={room} />
 
       <div className="role-card">
         <Avatar seed={me.id} role={guard ? "guard" : "prisoner"} size={56} mood={mine.comfort <= 4 ? "sad" : "neutral"} />
@@ -121,7 +129,7 @@ function Table({ code, online, me, host }: { code: string; online: boolean; me: 
 
       {room.phase === "round" && room.event && <div className={`event ${guard ? "ev-guard" : ""}`}>{guard ? <><b>Orders</b><p>{room.event.demand.text}</p><small>Ignore it and ORDER drops by {room.event.demand.penalty}.</small></> : <><b>Word on the block</b><p>{room.event.prisonerHint}</p></>}</div>}
 
-      {room.phase === "resolve" && <div className="resolve"><h3>What happened overnight</h3>{room.summary.map((l, i) => <p key={i} style={{ animationDelay: `${i * 0.12}s` }}>{l}</p>)}</div>}
+      {room.phase === "resolve" && <Summary room={room} me={mine} />}
 
       {room.phase === "round" && (
         <div className="acts">
@@ -135,7 +143,7 @@ function Table({ code, online, me, host }: { code: string; online: boolean; me: 
             </div>
             {needsTarget && <div className="targets">{prisoners.filter((p) => guard || p.id !== me.id).map((p) => (
               <button key={p.id} className={`tgt ${target === p.id ? "on" : ""}`} onClick={() => { setTarget(p.id); sfx.click(); }}>
-                <Avatar seed={p.bot ? p.name : p.id} role="prisoner" size={44} mood={p.comfort <= 4 ? "sad" : "neutral"} /><span>{p.name} #{p.num}</span><small>{"♥".repeat(Math.ceil(p.comfort / 4))}{p.isolated ? " · Hole" : ""}</small>
+                <Avatar seed={p.bot && !p.human ? p.name : p.id} role="prisoner" size={44} mood={p.comfort <= 4 ? "sad" : "neutral"} /><span>{p.name} #{p.num}</span><small>{"♥".repeat(Math.ceil(p.comfort / 4))}{p.isolated ? " · Hole" : ""}</small>
               </button>))}</div>}
             <button className="btn btn-big" disabled={!sel || (needsTarget && !target)} onClick={doAct}>{sel ? "Do it" : "Pick an action"}</button>
           </>}
@@ -149,11 +157,39 @@ function Table({ code, online, me, host }: { code: string; online: boolean; me: 
   );
 }
 
+function Dual({ room }: { room: Room }) {
+  return (
+    <div className="dual">
+      <div><span>Order</span><div className="hud-bar"><i style={{ width: `${room.order}%`, background: "var(--amber)" }} /><span className="hud-target" style={{ left: `${G_WIN}%` }} /></div><b>{room.order}</b></div>
+      <div><span>Solidarity</span><div className="hud-bar"><i style={{ width: `${room.solidarity}%`, background: "var(--orange)" }} /><span className="hud-target" style={{ left: `${P_WIN}%` }} /></div><b>{room.solidarity}</b></div>
+    </div>
+  );
+}
+
+function Summary({ room, me }: { room: Room; me: PPlayer }) {
+  const tag = me.role === "guard" ? `Officer ${me.name}` : `${me.name} #${me.num}`;
+  const mine = room.summary.filter((l) => l.includes(tag));
+  const rest = room.summary.filter((l) => !l.includes(tag));
+  const show = [...mine, ...rest].slice(0, 5);
+  return <div className="resolve"><h3>Overnight</h3>{show.map((l, i) => <p key={i} className={mine.includes(l) ? "you" : ""} style={{ animationDelay: `${i * 0.12}s` }}>{l}</p>)}{room.summary.length > 5 && <small className="muted">+{room.summary.length - 5} more in the log</small>}</div>;
+}
+
+function useWakeLock(active: boolean) {
+  useEffect(() => {
+    if (!active || !("wakeLock" in navigator)) return;
+    let lock: { release: () => Promise<void> } | null = null; let dead = false;
+    const get = async () => { try { lock = await (navigator as Navigator & { wakeLock: { request: (t: string) => Promise<{ release: () => Promise<void> }> } }).wakeLock.request("screen"); } catch {} };
+    const onVis = () => { if (!dead && document.visibilityState === "visible") void get(); };
+    void get(); document.addEventListener("visibilitychange", onVis);
+    return () => { dead = true; document.removeEventListener("visibilitychange", onVis); void lock?.release().catch(() => {}); };
+  }, [active]);
+}
+
 function Block({ room, meId }: { room: Room; meId: string }) {
   const g = room.players.filter((p) => p.role === "guard"), pr = room.players.filter((p) => p.role === "prisoner");
   const Cell = ({ p }: { p: PPlayer }) => {
     const done = (room.pending[p.id] || []).length >= limitFor(p);
-    return <div className={`cell ${p.id === meId ? "me" : ""}`}><Avatar seed={p.bot ? p.name : p.id} role={p.role} size={40} mood={p.role === "prisoner" && p.comfort <= 4 ? "sad" : p.role === "guard" && p.ledger.harm > 8 ? "smirk" : "neutral"} /><span>{p.role === "guard" ? p.name : `#${p.num}`}</span><small>{p.bot ? "sim" : room.phase === "round" ? (done ? "✓ ready" : "thinking") : ""}</small></div>;
+    return <div className={`cell ${p.id === meId ? "me" : ""}`}><Avatar seed={p.bot && !p.human ? p.name : p.id} role={p.role} size={40} mood={p.role === "prisoner" && p.comfort <= 4 ? "sad" : p.role === "guard" && p.ledger.harm > 8 ? "smirk" : "neutral"} /><span>{p.role === "guard" ? p.name : `#${p.num}`}</span><small>{p.bot ? (p.human ? "away" : "sim") : room.phase === "round" ? (done ? "✓ ready" : "thinking") : ""}</small></div>;
   };
   return <div className="block"><div className="block-row"><span className="lbl">Guards</span>{g.map((p) => <Cell key={p.id} p={p} />)}</div><div className="block-row bars"><span className="lbl">Cells</span>{pr.map((p) => <Cell key={p.id} p={p} />)}</div></div>;
 }
@@ -179,8 +215,12 @@ function EndScreen({ room, meId, host, onLobby }: { room: Room; meId: string; ho
       ) : (<>
         {v && <div className="arch"><div className="arch-stamp">{v.title}</div><p className="arch-line">{v.line}</p></div>}
         <div className="awards">{aw.map((a) => <div key={a.title} className="award"><b>{a.title}</b><span>{a.who}</span><small>{a.why}</small></div>)}</div>
-        <div className="tbl"><table><thead><tr><th>Player</th><th>Role</th><th>Harm</th><th>Mercy</th><th>Obeyed</th><th>Defied</th><th>Betrayed</th><th>Solidarity</th></tr></thead>
-          <tbody>{room.players.map((p) => <tr key={p.id} className={p.id === meId ? "me" : ""}><td>{p.name}{p.bot ? " (sim)" : ""}</td><td>{p.role}</td><td>{p.ledger.harm}</td><td>{p.ledger.mercy}</td><td>{p.ledger.obey}</td><td>{p.ledger.defy}</td><td>{p.ledger.betray}</td><td>{p.ledger.solidarity}</td></tr>)}</tbody></table></div>
+        <div className="ledgers">{room.players.map((p) => { const v = verdict(p); return (
+          <div key={p.id} className={`ledger ${p.id === meId ? "me" : ""}`}>
+            <Avatar seed={p.bot && !p.human ? p.name : p.id} role={p.role} size={40} />
+            <div><b>{p.name}{p.bot && !p.human ? " (sim)" : ""}</b><small>{p.role} · {v.title}</small>
+              <div className="lchips">{p.role === "guard" ? <><span>Harm {p.ledger.harm}</span><span>Mercy {p.ledger.mercy}</span><span>Obeyed {p.ledger.obey}</span><span>Defied {p.ledger.defy}</span></> : <><span>Solidarity {p.ledger.solidarity}</span><span>Mercy {p.ledger.mercy}</span><span>Betrayed {p.ledger.betray}</span><span>Defied {p.ledger.defy}</span></>}</div></div>
+          </div>); })}</div>
         <p className="muted">Talk about it: did the guards need the Warden to get harsh, or did they get there on their own? Did anyone refuse? In the original 1971 study, the guards who stayed kind never stopped the ones who weren't.</p>
       </>)}
       <div className="res-actions">

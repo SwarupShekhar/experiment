@@ -60,3 +60,39 @@ revoke all on function public.recent_runs(int) from public;
 grant execute on function public.submit_run(uuid, text, jsonb, text, int, jsonb, jsonb, int, int, text) to anon, service_role;
 grant execute on function public.remove_run(uuid, text) to anon, service_role;
 grant execute on function public.recent_runs(int) to anon, service_role;
+create table if not exists public.sessions (
+  id uuid primary key,
+  started_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  cond jsonb not null default '{}'::jsonb,
+  furthest_idx smallint not null default 0,
+  furthest_scene text not null default '',
+  total smallint not null default 0,
+  finished boolean not null default false
+);
+alter table public.sessions enable row level security;
+revoke all on table public.sessions from anon, authenticated;
+create index if not exists sessions_started_idx on public.sessions (started_at desc);
+
+create or replace function public.track_progress(p_id uuid, p_idx int, p_scene text, p_total int, p_cond jsonb, p_finished boolean)
+returns void language plpgsql security definer set search_path = '' as $$
+begin
+  if p_idx not between 0 and 200 or char_length(p_scene) > 40 or p_total not between 1 and 200
+     or octet_length(coalesce(p_cond,'{}')::text) > 500 then return; end if;
+  insert into public.sessions (id, cond, furthest_idx, furthest_scene, total, finished)
+  values (p_id, coalesce(p_cond,'{}'), p_idx, p_scene, p_total, coalesce(p_finished,false))
+  on conflict (id) do update set
+    furthest_idx = greatest(public.sessions.furthest_idx, excluded.furthest_idx),
+    furthest_scene = case when excluded.furthest_idx >= public.sessions.furthest_idx then excluded.furthest_scene else public.sessions.furthest_scene end,
+    finished = public.sessions.finished or excluded.finished,
+    updated_at = now();
+end $$;
+revoke all on function public.track_progress(uuid, int, text, int, jsonb, boolean) from public;
+grant execute on function public.track_progress(uuid, int, text, int, jsonb, boolean) to anon, service_role;
+
+-- Drop-off funnel for the site owner (run in SQL editor): how many sessions reached each scene.
+create or replace view public.funnel with (security_invoker = on) as
+  select furthest_scene as scene, furthest_idx as idx, count(*) as stopped_here,
+         sum(count(*)) over (order by furthest_idx desc) as reached
+  from public.sessions group by furthest_scene, furthest_idx order by furthest_idx;
+revoke all on public.funnel from anon, authenticated;

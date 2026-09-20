@@ -2,7 +2,7 @@
 export type PRole = "guard" | "prisoner";
 export interface Persona { aggression: number; obedience: number; empathy: number }
 export interface Ledger { harm: number; mercy: number; obey: number; defy: number; betray: number; solidarity: number; humiliate: number }
-export interface PPlayer { id: string; name: string; role: PRole; num: number; bot: boolean; persona: Persona; comfort: number; ledger: Ledger; isolated: boolean; left?: boolean; lastAct?: string }
+export interface PPlayer { id: string; name: string; role: PRole; num: number; bot: boolean; persona: Persona; comfort: number; ledger: Ledger; isolated: boolean; left?: boolean; lastAct?: string; human?: boolean }
 export type GuardAct = "rollcall" | "listen" | "reward" | "warn" | "revoke" | "taunt" | "hole" | "lockdown";
 export type PrisAct = "comply" | "rest" | "support" | "organize" | "protest" | "snitch";
 export interface Act { by: string; type: GuardAct | PrisAct; target?: string }
@@ -14,6 +14,7 @@ export interface Room {
   code: string; phase: "lobby" | "round" | "resolve" | "end"; round: number; settings: Settings; endsAt: number;
   order: number; solidarity: number; players: PPlayer[]; pending: Record<string, Act[]>; event: EventCard | null;
   log: LogLine[]; hostId: string; summary: string[]; winner?: "guards" | "prisoners" | "draw" | "none"; rev: number;
+  watchers: { id: string; name: string }[]; deck?: string[];
 }
 
 export const GUARD_ACTS: Record<GuardAct, { label: string; sub: string; target: "one" | "all" | "none"; order: number; sol: number; comfort: number; ledger: Partial<Ledger>; verb: string }> = {
@@ -56,16 +57,33 @@ const MAX_HUMANS = 12;
 export const G_WIN = 85, P_WIN = 60, NIGHT_DRIFT = { order: -5, sol: 3 };
 
 export function createRoom(code: string, hostId: string, hostName: string): Room {
-  return { code, phase: "lobby", round: 0, settings: { rounds: 6, roundSecs: 45 }, endsAt: 0, order: 50, solidarity: 20, players: [humanLobby(hostId, hostName)], pending: {}, event: null, log: [], hostId, summary: [], rev: 0 };
+  return { code, phase: "lobby", round: 0, settings: { rounds: 6, roundSecs: 45 }, endsAt: 0, order: 50, solidarity: 20, players: [humanLobby(hostId, hostName)], pending: {}, event: null, log: [], hostId, summary: [], rev: 0, watchers: [] };
 }
-function humanLobby(id: string, name: string): PPlayer { return { id, name: name.slice(0, 16) || "Player", role: "prisoner", num: 0, bot: false, persona: { aggression: 0, obedience: 0, empathy: 0 }, comfort: 10, ledger: zl(), isolated: false }; }
+function humanLobby(id: string, name: string): PPlayer { return { id, name: name.slice(0, 16) || "Player", role: "prisoner", num: 0, bot: false, human: true, persona: { aggression: 0, obedience: 0, empathy: 0 }, comfort: 10, ledger: zl(), isolated: false }; }
 
 export function addPlayer(r: Room, id: string, name: string): Room {
-  if (r.players.some((p) => p.id === id)) return { ...r, players: r.players.map((p) => (p.id === id ? { ...p, left: false, name: name.slice(0, 16) || p.name } : p)) };
-  if (r.phase !== "lobby" || r.players.filter((p) => !p.bot).length >= MAX_HUMANS) return r;
+  const ex = r.players.find((p) => p.id === id);
+  if (ex) {
+    if (!ex.left && ex.bot === !ex.human) return r;
+    const back = ex.left && r.phase !== "lobby" ? log(r, `${ex.name} reconnected.`, "system") : r;
+    return bump({ ...back, players: back.players.map((p) => (p.id === id ? { ...p, left: false, bot: !p.human, name: name.slice(0, 16) || p.name } : p)) });
+  }
+  if (r.phase !== "lobby") {
+    if ((r.watchers || []).some((w) => w.id === id)) return r;
+    return bump({ ...r, watchers: [...(r.watchers || []), { id, name: name.slice(0, 16) || "Player" }] });
+  }
+  if (r.players.filter((p) => !p.bot).length >= MAX_HUMANS) return r;
   return bump({ ...r, players: [...r.players, humanLobby(id, name)] });
 }
+/** Hand hosting to another human (host migration). */
+export function setHost(r: Room, id: string): Room {
+  const old = r.hostId;
+  let n: Room = { ...r, hostId: id };
+  if (old !== id) n = markLeft(n, old);
+  return bump(log(n, "The host dropped out. Hosting moved to another player.", "system"));
+}
 export function markLeft(r: Room, id: string): Room {
+  if ((r.watchers || []).some((w) => w.id === id)) return bump({ ...r, watchers: r.watchers.filter((w) => w.id !== id) });
   if (r.phase === "lobby") return bump({ ...r, players: r.players.filter((p) => p.id !== id || p.id === r.hostId) });
   const p = r.players.find((x) => x.id === id); if (!p || p.bot || p.left) return r;
   const bp = p.role === "guard" ? BOT_GUARDS[1][1] : BOT_PRIS[4][1];
@@ -75,7 +93,7 @@ function bump(r: Room): Room { return { ...r, rev: r.rev + 1 }; }
 function log(r: Room, text: string, kind: LogLine["kind"]): Room { return { ...r, log: [...r.log, { round: r.round, text, kind }].slice(-120) }; }
 
 export function startGame(r: Room, s: Settings, now: number): Room {
-  const humans = r.players.filter((p) => !p.bot && !p.left);
+  const humans = r.players.filter((p) => p.human && !p.left);
   const seats = Math.max(6, humans.length);
   const nG = Math.max(1, Math.round(seats / 3));
   const roles: PRole[] = shuffle([...Array(nG).fill("guard"), ...Array(seats - nG).fill("prisoner")]);
@@ -92,11 +110,10 @@ export function startGame(r: Room, s: Settings, now: number): Room {
   const rounds = clamp(s.rounds, 3, 6), roundSecs = clamp(s.roundSecs, 20, 90);
   const DECKS: Record<number, number[]> = { 3: [0, 2, 5], 4: [0, 2, 3, 5], 5: [0, 1, 2, 3, 5], 6: [0, 1, 2, 3, 4, 5] };
   const deck = (DECKS[rounds] || DECKS[6]).map((i) => EVENTS[i]);
-  const room: Room = { ...r, phase: "round", round: 1, settings: { rounds, roundSecs }, order: 50, solidarity: 20, players, pending: {}, event: deck[0], log: [], summary: [], winner: undefined, endsAt: now + roundSecs * 1000 };
-  (room as Room & { deck?: EventCard[] }).deck = deck;
+  const room: Room = { ...r, phase: "round", round: 1, settings: { rounds, roundSecs }, order: 50, solidarity: 20, players, pending: {}, event: deck[0], log: [], summary: [], winner: undefined, endsAt: now + roundSecs * 1000, deck: deck.map((e) => e.id), watchers: [] };
   return bump(log(room, `Night 1 · ${deck[0].title}`, "event"));
 }
-export const deckOf = (r: Room): EventCard[] => (r as Room & { deck?: EventCard[] }).deck || EVENTS;
+export const deckOf = (r: Room): EventCard[] => (r.deck ? r.deck.map((id) => EVENTS.find((e) => e.id === id)!).filter(Boolean) : EVENTS);
 
 export function limitFor(p: PPlayer) { return p.role === "guard" ? 2 : 1; }
 
@@ -120,7 +137,7 @@ export function emote(r: Room, id: string, text: string): Room {
   if (!EMOTES[p.role].includes(text)) return r;
   return bump(log(r, `${label(p)}: “${text}”`, "emote"));
 }
-export function allIn(r: Room) { return r.players.filter((p) => !p.bot).every((p) => (r.pending[p.id] || []).length >= limitFor(p)); }
+export function allIn(r: Room) { return r.players.filter((p) => !p.bot && !p.left).every((p) => (r.pending[p.id] || []).length >= limitFor(p)); }
 export const label = (p: PPlayer) => (p.role === "guard" ? `Officer ${p.name}` : `${p.name} #${p.num}`);
 
 function botActs(r: Room, p: PPlayer, rnd = Math.random): Act[] {
@@ -212,7 +229,9 @@ export function tick(r: Room, now: number): Room {
   return r;
 }
 export function backToLobby(r: Room): Room {
-  return bump({ ...r, phase: "lobby", round: 0, event: null, log: [], summary: [], winner: undefined, pending: {}, players: r.players.filter((p) => !p.bot && !p.left).map((p) => humanLobby(p.id, p.name)) });
+  const players = r.players.filter((p) => p.human && !p.left).map((p) => humanLobby(p.id, p.name));
+  for (const w of r.watchers || []) if (!players.some((p) => p.id === w.id)) players.push(humanLobby(w.id, w.name));
+  return bump({ ...r, phase: "lobby", round: 0, event: null, log: [], summary: [], winner: undefined, pending: {}, players, watchers: [], deck: undefined });
 }
 
 export interface Verdict { title: string; line: string; score: number }
@@ -236,10 +255,10 @@ export function awards(r: Room): { title: string; who: string; why: string }[] {
   const out: { title: string; who: string; why: string }[] = [];
   const top = (role: PRole, k: keyof Ledger) => r.players.filter((p) => p.role === role).sort((a, b) => b.ledger[k] - a.ledger[k])[0];
   const add = (title: string, p: PPlayer | undefined, k: keyof Ledger, why: string) => { if (p && p.ledger[k] > 0) out.push({ title, who: label(p) + (p.bot ? " (sim)" : ""), why: why.replace("{n}", String(p.ledger[k])) }); };
-  add("Iron Fist", top("guard", "harm"), "harm", "{n} harm points dealt");
-  add("Soft Heart", top("guard", "mercy"), "mercy", "{n} acts of mercy");
-  add("Yes-Man", top("guard", "obey"), "obey", "followed {n} Warden orders");
-  add("Rat", top("prisoner", "betray"), "betray", "{n} betrayal points");
-  add("Ringleader", top("prisoner", "solidarity"), "solidarity", "{n} solidarity points");
+  add("Heaviest Hand", top("guard", "harm"), "harm", "{n} harm points dealt");
+  add("Softest Touch", top("guard", "mercy"), "mercy", "{n} acts of mercy");
+  add("Most Obedient", top("guard", "obey"), "obey", "followed {n} Warden orders");
+  add("Biggest Rat", top("prisoner", "betray"), "betray", "{n} betrayal points");
+  add("Heart of the Strike", top("prisoner", "solidarity"), "solidarity", "{n} solidarity points");
   return out;
 }

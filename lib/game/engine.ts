@@ -191,7 +191,9 @@ export function computeResults(s: RunState): Results {
     const harsh = quota.filter((q) => ["lights", "inspect", "count3", "mail"].includes(q)).length;
     insights.push(harsh >= 2
       ? { title: "The quota won", body: `Given a target and a promotion, you picked ${harsh} of 3 measures that hurt people to hit it.`, research: "Numeric targets reshape behaviour toward whatever is measured: Goodhart's law in a uniform." }
-      : { title: "You ignored the scoreboard", body: "Offered a promotion for hitting ORDER 80, you mostly picked the humane measures.", research: "People who reject a bad metric usually pay for it. Your shift score is lower because of it." });
+      : s.meters.order >= 80
+        ? { title: "Kind, and still on target", body: "Offered a promotion for hitting ORDER 80, you mostly picked the humane measures, and hit the target anyway.", research: "Order and decency are not always opposites. The harsh options were the fast route, not the only one." }
+        : { title: "You ignored the scoreboard", body: `Offered a promotion for hitting ORDER 80, you mostly picked the humane measures and finished on ${s.meters.order}.`, research: "People who reject a bad metric usually pay for it. You lost the promotion; the prisoners kept their sleep." });
   }
   // Self-perception gap
   const self = a.self ? Number(a.self.value) : null;
@@ -206,7 +208,8 @@ export function computeResults(s: RunState): Results {
     insights.push({ title: "Responsibility moved upward", body: `You named ${blame === "warden" ? "the Warden" : blame === "system" ? "the system" : "the prisoners"} as responsible.`, research: "Milgram called this the 'agentic state': once someone else is in charge, people stop feeling like the author of their own acts." });
 
   const escalation = [1, 2, 3, 4].map((ch) => s.byChapter[ch]?.harm || 0);
-  const timed = Object.values(a).filter((x) => x.ms > 0 && x.ms < 120000);
+  const moral = new Set(scenesFor(s.cond).filter((x) => (x.kind === "choice" || x.kind === "prod" || x.kind === "slider") && x.chapter >= 1 && x.id !== "self" && x.id !== "blame").map((x) => x.id));
+  const timed = Object.values(a).filter((x) => moral.has(x.scene) && x.ms > 300 && x.ms < 120000);
   const avgDecisionMs = timed.length ? Math.round(timed.reduce((q, x) => q + x.ms, 0) / timed.length) : 0;
 
   const stars = s.meters.order >= 80 ? 3 : s.meters.order >= 65 ? 2 : s.meters.order >= 50 ? 1 : 0;

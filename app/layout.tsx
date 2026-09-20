@@ -1,5 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
+import "@fontsource/atkinson-hyperlegible/latin-400.css";
+import "@fontsource/atkinson-hyperlegible/latin-700.css";
+import "@fontsource/big-shoulders-display/latin-700";
+import "@fontsource/big-shoulders-display/latin-900";
 import "./globals.css";
 import { SITE } from "@/lib/site";
 
@@ -16,12 +20,6 @@ export const viewport: Viewport = { themeColor: "#101110", width: "device-width"
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-        {/* eslint-disable-next-line @next/next/no-page-custom-font */}
-        <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Big+Shoulders+Display:wght@500;700;900&display=swap" rel="stylesheet" />
-      </head>
       <body>
         <header className="site-h">
           <Link href="/" className="logo" aria-label={`${SITE.name} home`}><span className="logo-bars" aria-hidden>|||</span>{SITE.name}</Link>

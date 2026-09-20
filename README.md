@@ -41,6 +41,18 @@ The Supabase project **block9** (`xchvvotvkmurtrynafat`, us-east-1) is already c
 
 Supabase's advisor flags these as "callable by anon". That's intentional. Party rooms use Supabase Realtime broadcast + presence and need no tables. To rebuild the database elsewhere, run `supabase/schema.sql`.
 
+## Drop-off tracking
+
+Each solo session records the furthest scene reached (anonymous). If the `sessions` table and `track_progress` function aren't there yet, run the second half of `supabase/schema.sql` once. Then, in the Supabase SQL editor:
+
+```sql
+select * from public.funnel;   -- how many players reached / stopped at each scene
+```
+
+## Testing multiplayer locally
+
+Add `?localnet=1` to any party URL (e.g. `/party?localnet=1`) to run rooms over the browser's BroadcastChannel instead of Supabase. Open several tabs to play against yourself, including closing the host tab to test host hand-over.
+
 ## Customise
 
 - **Name / tagline**: `lib/site.ts` (and the `<title>` strings in `app/opengraph-image.tsx`).

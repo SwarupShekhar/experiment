@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { addPlayer, createRoom, emote as emoteFn, markLeft, startGame, submit, tick, backToLobby, type Act, type Room, type Settings } from "@/lib/party/engine";
+import { addPlayer, createRoom, emote as emoteFn, markLeft, setHost, startGame, submit, tick, backToLobby, type Act, type Room, type Settings } from "@/lib/party/engine";
 import { joinChannel, type Channel, type Peer } from "@/lib/party/net";
 
 export function usePlayerId() {
@@ -15,72 +15,122 @@ export function usePlayerId() {
 }
 
 export type Status = "connecting" | "ready" | "host-gone" | "error" | "offline";
+const HOST_TIMEOUT = 9000; // no word from host this long → another player takes over
+const saveKey = (code: string) => "b9_room_" + code;
+
+function restore(code: string, me: { id: string; name: string }): Room {
+  try { const r = JSON.parse(sessionStorage.getItem(saveKey(code)) || "null") as Room | null; if (r && r.hostId === me.id && r.code === code) return r; } catch {}
+  return createRoom(code, me.id, me.name);
+}
 
 export function useRoom(opts: { code: string; me: { id: string; name: string }; host: boolean; online: boolean }) {
-  const { code, me, host, online } = opts;
-  const [room, setRoom] = useState<Room | null>(() => (host ? createRoom(code, me.id, me.name) : null));
+  const { code, me, online } = opts;
+  const [isHost, setIsHost] = useState(opts.host);
+  const [room, setRoom] = useState<Room | null>(() => (opts.host ? restore(code, me) : null));
   const [status, setStatus] = useState<Status>(online ? "connecting" : "offline");
-  const [skew, setSkew] = useState(0); // guest: local clock minus host clock
+  const [skew, setSkew] = useState(0);
   const ref = useRef<Room | null>(room);
+  const hostRef = useRef(opts.host);
   const ch = useRef<Channel | null>(null);
-  const lastHostSeen = useRef(Date.now());
+  const peers = useRef<Peer[]>([]);
+  const lastHostWord = useRef(Date.now());
+  const lastSent = useRef(0);
 
-  const publish = useCallback((r: Room) => { ref.current = r; setRoom(r); ch.current?.send("state", { room: r, sentAt: Date.now() }); }, []);
-  const update = useCallback((fn: (r: Room) => Room) => { const cur = ref.current; if (!cur) return; const n = fn(cur); if (n !== cur) publish(n); }, [publish]);
+  const persist = (r: Room) => { if (!online || !hostRef.current) return; try { sessionStorage.setItem(saveKey(code), JSON.stringify(r)); } catch {} };
+  const publish = useCallback((r: Room) => { ref.current = r; setRoom(r); persist(r); lastSent.current = Date.now(); ch.current?.send("state", { room: r, sentAt: Date.now() }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const update = useCallback((fn: (r: Room) => Room) => { if (!hostRef.current) return; const cur = ref.current; if (!cur) return; const n = fn(cur); if (n !== cur) publish(n); }, [publish]);
+
+  const becomeHost = useCallback((from: Room) => {
+    hostRef.current = true; setIsHost(true);
+    ch.current?.retrack({ id: me.id, name: me.name, host: true });
+    publish(setHost(from, me.id));
+  }, [me.id, me.name, publish]);
+  const becomeGuest = useCallback(() => {
+    hostRef.current = false; setIsHost(false);
+    try { sessionStorage.removeItem(saveKey(code)); sessionStorage.removeItem("b9_host_" + code); } catch {}
+    ch.current?.retrack({ id: me.id, name: me.name, host: false });
+  }, [code, me.id, me.name]);
 
   useEffect(() => {
     if (!online) return;
-    const c = joinChannel(code, { id: me.id, name: me.name, host }, {
-      onStatus: (s) => { if (s === "SUBSCRIBED") { setStatus("ready"); if (host) publish(ref.current!); else ch.current?.send("hello", { id: me.id, name: me.name }); } else if (s === "CHANNEL_ERROR" || s === "TIMED_OUT") setStatus("error"); },
+    const c = joinChannel(code, { id: me.id, name: me.name, host: hostRef.current }, {
+      onStatus: (s) => {
+        if (s === "SUBSCRIBED") { setStatus("ready"); lastHostWord.current = Date.now(); if (hostRef.current) publish(ref.current!); else ch.current?.send("hello", { id: me.id, name: me.name }); }
+        else if (s === "CHANNEL_ERROR" || s === "TIMED_OUT") setStatus("error");
+      },
       onEvent: (ev, p) => {
         const pl = p as Record<string, unknown>;
-        if (host) {
-          if (ev === "hello") { update((r) => addPlayer(r, String(pl.id), String(pl.name))); ch.current?.send("state", { room: ref.current, sentAt: Date.now() }); }
-          if (ev === "action") update((r) => submit(r, String(pl.from), pl.act as Omit<Act, "by">));
-          if (ev === "emote") update((r) => emoteFn(r, String(pl.from), String(pl.text)));
-        } else if (ev === "state") {
-          const incoming = pl.room as Room; lastHostSeen.current = Date.now();
+        if (ev === "state") {
+          const incoming = pl.room as Room;
+          if (hostRef.current) {
+            // another player is hosting with newer state (we were migrated away while asleep): step down
+            if (incoming.hostId !== me.id && ref.current && incoming.rev > ref.current.rev) { becomeGuest(); ref.current = incoming; setRoom(incoming); lastHostWord.current = Date.now(); }
+            return;
+          }
+          lastHostWord.current = Date.now();
           setSkew(Date.now() - Number(pl.sentAt));
-          if (!ref.current || incoming.rev >= ref.current.rev || incoming.phase === "lobby") { ref.current = incoming; setRoom(incoming); }
+          if (!ref.current || incoming.rev >= ref.current.rev || incoming.hostId !== ref.current.hostId) { ref.current = incoming; setRoom(incoming); }
+          return;
         }
+        if (ev === "hb") { if (!hostRef.current) { lastHostWord.current = Date.now(); setSkew(Date.now() - Number(pl.sentAt)); } return; }
+        if (!hostRef.current) return;
+        if (ev === "hello") { update((r) => addPlayer(r, String(pl.id), String(pl.name))); ch.current?.send("state", { room: ref.current, sentAt: Date.now() }); }
+        if (ev === "action") update((r) => submit(r, String(pl.from), pl.act as Omit<Act, "by">));
+        if (ev === "emote") update((r) => emoteFn(r, String(pl.from), String(pl.text)));
       },
-      onPeers: (peers: Peer[]) => {
-        if (host) {
-          const ids = new Set(peers.map((x) => x.id));
-          update((r) => {
-            let n = r;
-            for (const x of peers) if (x.id !== me.id) n = addPlayer(n, x.id, x.name);
-            for (const p of n.players) if (!p.bot && p.id !== me.id && !ids.has(p.id)) n = markLeft(n, p.id);
-            return n;
-          });
-        } else {
-          if (peers.some((x) => x.host)) lastHostSeen.current = Date.now();
-        }
+      onPeers: (list: Peer[]) => {
+        peers.current = list;
+        if (!hostRef.current) return;
+        const ids = new Set(list.map((x) => x.id));
+        update((r) => {
+          let n = r;
+          for (const x of list) if (x.id !== me.id) n = addPlayer(n, x.id, x.name);
+          for (const p of n.players) if (p.human && !p.left && p.id !== me.id && !ids.has(p.id)) n = markLeft(n, p.id);
+          for (const w of n.watchers || []) if (!ids.has(w.id)) n = markLeft(n, w.id);
+          return n;
+        });
       },
     });
     ch.current = c;
     if (!c) setStatus("error");
     return () => { c?.close(); ch.current = null; };
-  }, [code, me.id, me.name, host, online]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [code, me.id, me.name, online]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // host clock
+  // host: game clock + heartbeat
   useEffect(() => {
-    if (!host) return;
-    const t = setInterval(() => update((r) => tick(r, Date.now())), 500);
+    if (!isHost) return;
+    const t = setInterval(() => {
+      update((r) => tick(r, Date.now()));
+      if (online && Date.now() - lastSent.current > 2500) { lastSent.current = Date.now(); ch.current?.send("hb", { sentAt: Date.now() }); }
+    }, 500);
     return () => clearInterval(t);
-  }, [host, update]);
+  }, [isHost, online, update]);
 
-  // guest: detect missing host
+  // guest: host watchdog + migration
   useEffect(() => {
-    if (host || !online) return;
-    const t = setInterval(() => { if (Date.now() - lastHostSeen.current > 15000) setStatus("host-gone"); else setStatus((s) => (s === "host-gone" ? "ready" : s)); }, 2000);
+    if (isHost || !online) return;
+    const t = setInterval(() => {
+      const r = ref.current;
+      const silent = Date.now() - lastHostWord.current;
+      if (!r) { if (silent > 20000) setStatus("host-gone"); return; }
+      if (silent < HOST_TIMEOUT) { setStatus((s) => (s === "host-gone" ? "ready" : s)); return; }
+      // deterministic election among connected humans still in the room
+      const present = new Set(peers.current.map((p) => p.id));
+      const eligible = [...r.players.filter((p) => p.human && !p.left).map((p) => p.id), ...(r.watchers || []).map((w) => w.id)]
+        .filter((id) => id !== r.hostId && present.has(id)).sort();
+      if (eligible[0] === me.id) becomeHost(r);
+      else if (silent > HOST_TIMEOUT * 3) setStatus("host-gone");
+    }, 1000);
     return () => clearInterval(t);
-  }, [host, online]);
+  }, [isHost, online, me.id, becomeHost]);
 
-  const act = useCallback((a: Omit<Act, "by">) => { if (host) update((r) => submit(r, me.id, a)); else { ch.current?.send("action", { from: me.id, act: a }); setRoom((r) => (r ? { ...r, pending: { ...r.pending, [me.id]: [...(r.pending[me.id] || []), { ...a, by: me.id }] } } : r)); } }, [host, me.id, update]);
-  const sendEmote = useCallback((text: string) => { if (host) update((r) => emoteFn(r, me.id, text)); else ch.current?.send("emote", { from: me.id, text }); }, [host, me.id, update]);
-  const start = useCallback((s: Settings) => { if (host) update((r) => startGame(r, s, Date.now())); }, [host, update]);
-  const lobby = useCallback(() => { if (host) update((r) => backToLobby(r)); }, [host, update]);
+  const act = useCallback((a: Omit<Act, "by">) => {
+    if (hostRef.current) update((r) => submit(r, me.id, a));
+    else { ch.current?.send("action", { from: me.id, act: a }); setRoom((r) => (r ? { ...r, pending: { ...r.pending, [me.id]: [...(r.pending[me.id] || []), { ...a, by: me.id }] } } : r)); }
+  }, [me.id, update]);
+  const sendEmote = useCallback((text: string) => { if (hostRef.current) update((r) => emoteFn(r, me.id, text)); else ch.current?.send("emote", { from: me.id, text }); }, [me.id, update]);
+  const start = useCallback((s: Settings) => update((r) => startGame(r, s, Date.now())), [update]);
+  const lobby = useCallback(() => update((r) => backToLobby(r)), [update]);
 
-  return { room, status, skew, act, sendEmote, start, lobby };
+  return { room, status, skew, isHost, act, sendEmote, start, lobby };
 }
