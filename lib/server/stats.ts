@@ -22,7 +22,7 @@ const TTL = 60_000;
 export async function getAggregate(force = false): Promise<Aggregate | null> {
   if (!force && cache.agg && Date.now() - cache.at < TTL) return cache.agg;
   const c = db(); if (!c) return null;
-  const { data, error } = await c.from("runs").select("mode,cond,archetype,corruption,pct,answers").order("created_at", { ascending: false }).limit(5000);
+  const { data, error } = await c.rpc("recent_runs", { p_limit: 5000 });
   if (error || !data) return cache.agg;
   const agg = aggregate(data as Row[]);
   cache = { at: Date.now(), agg };
@@ -35,7 +35,8 @@ export function aggregate(rows: Row[]): Aggregate {
   const solo = rows.filter((r) => r.mode === "solo");
   const archetypes: Record<string, number> = {};
   const histogram = Array(10).fill(0);
-  rows.forEach((r) => { archetypes[r.archetype] = (archetypes[r.archetype] || 0) + 1; histogram[Math.min(9, Math.floor(r.corruption / 10))]++; });
+  rows.forEach((r) => { archetypes[r.archetype] = (archetypes[r.archetype] || 0) + 1; });
+  solo.forEach((r) => { histogram[Math.min(9, Math.floor(r.corruption / 10))]++; });
   const keys = ["harm", "obedience", "conformity", "dehumanize", "mercy", "defiance"];
   const meanPct = Object.fromEntries(keys.map((k) => [k, Math.round(mean(solo.map((r) => r.pct?.[k] ?? 0)))]));
   const split = (label: string, fn: (r: Row) => boolean, la: string, lb: string) => {
@@ -67,7 +68,7 @@ export function aggregate(rows: Row[]): Aggregate {
     if (!isNaN(self)) { const act = h < 22 ? 0 : h < 45 ? 1 : h < 65 ? 2 : 3; sv.n++; if (act > self) sv.underrate++; else if (act < self) sv.overrate++; else sv.accurate++; }
   }
   for (const s of Object.values(scenes)) if (s.mean !== undefined) s.mean = +(s.mean / s.n).toFixed(1);
-  return { n: rows.length, updatedAt: new Date().toISOString(), archetypes, corruptionSorted: rows.map((r) => r.corruption).sort((a, b) => a - b), histogram, meanPct, byCondition, scenes, quotaItems, selfVsActual: sv };
+  return { n: rows.length, updatedAt: new Date().toISOString(), archetypes, corruptionSorted: solo.map((r) => r.corruption).sort((a, b) => a - b), histogram, meanPct, byCondition, scenes, quotaItems, selfVsActual: sv };
 }
 
 export function percentile(sorted: number[], v: number) {

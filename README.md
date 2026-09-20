@@ -21,24 +21,25 @@ npm run sim        # balance check: 8,000 simulated solo runs + 500 party games
 
 ## Deploy
 
+The Supabase project **block9** (`xchvvotvkmurtrynafat`, us-east-1) is already created and migrated, and its public URL + anon key are committed in `.env.production`. No environment variables are required.
+
 1. **Push to GitHub**
    ```bash
    git remote add origin https://github.com/<you>/block9.git
    git push -u origin main
    ```
-2. **Vercel** → Add New → Project → import the repo → Deploy. No build settings needed.
-3. In Vercel → Settings → Environment Variables, set `NEXT_PUBLIC_SITE_URL` to your live URL (e.g. `https://block9.vercel.app`), then redeploy.
+2. **Vercel** → Add New → Project → import the repo → Deploy. That's it.
+3. *(Optional)* Custom domain: add it in Vercel, then set `NEXT_PUBLIC_SITE_URL=https://yourdomain.com` so the sitemap and share images use it. Without it, Vercel's production URL is used automatically.
 
-The site now fully works: solo mode, practice party mode, blog. Results aren't stored and online rooms are off until step 4.
+### Database design
 
-4. **Supabase (free tier)** for stored results and online party rooms:
-   - Create a project at supabase.com.
-   - SQL Editor → paste `supabase/schema.sql` → Run.
-   - Project Settings → API: copy the URL, `anon` key and `service_role` key into Vercel as
-     `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
-   - Redeploy.
+`public.runs` is locked (RLS on, no policies, no grants). The site only talks to three Postgres functions, so no secret key is needed anywhere:
 
-   The `runs` table has row-level security on with no policies, so the public key can't read or write it; only the server route does. Party rooms use Supabase Realtime broadcast/presence and need no tables.
+- `submit_run(...)`: validated insert of one anonymous run.
+- `remove_run(id, token_hash)`: deletes a run only with the player's secret token (kept in their browser).
+- `recent_runs(limit)`: anonymous choices for the live results page; never returns ids or tokens.
+
+Supabase's advisor flags these as "callable by anon". That's intentional. Party rooms use Supabase Realtime broadcast + presence and need no tables. To rebuild the database elsewhere, run `supabase/schema.sql`.
 
 ## Customise
 

@@ -29,17 +29,18 @@ export async function POST(req: Request) {
   if (!ok) return NextResponse.json({ error: "invalid" }, { status: 400 });
 
   const agg = await getAggregate();
-  const stats = { n: agg?.n ?? 0, corruptionPercentile: agg ? percentile(agg.corruptionSorted, b.corruption as number) : undefined };
+  const stats = { n: agg?.corruptionSorted.length ?? 0, corruptionPercentile: agg ? percentile(agg.corruptionSorted, b.corruption as number) : undefined };
   const c = db();
   if (!c) return NextResponse.json({ stored: false, stats });
-  const { error } = await c.from("runs").insert({
-    id: b.id, mode: b.mode, cond: b.cond, archetype: b.archetype, corruption: Math.round(b.corruption as number), pct: b.pct, answers: b.answers,
-    duration_ms: num(b.durationMs, 0, 1e8) ? Math.round(b.durationMs as number) : null,
-    order_score: num(b.order, 0, 100) ? Math.round(b.order as number) : null,
-    delete_token_hash: sha(b.deleteToken as string),
+  const { data, error } = await c.rpc("submit_run", {
+    p_id: b.id, p_mode: b.mode, p_cond: b.cond, p_archetype: b.archetype, p_corruption: Math.round(b.corruption as number),
+    p_pct: b.pct, p_answers: b.answers,
+    p_duration: num(b.durationMs, 0, 1e8) ? Math.round(b.durationMs as number) : null,
+    p_order: num(b.order, 0, 100) ? Math.round(b.order as number) : null,
+    p_token_hash: sha(b.deleteToken as string),
   });
-  if (error) return NextResponse.json({ stored: false, stats }, { status: 200 });
-  return NextResponse.json({ stored: true, stats });
+  if (!error && data === true) return NextResponse.json({ stored: true, stats });
+  return NextResponse.json({ stored: false, stats });
 }
 
 export async function DELETE(req: Request) {
@@ -47,7 +48,7 @@ export async function DELETE(req: Request) {
   try { b = await req.json(); } catch { return NextResponse.json({ error: "bad json" }, { status: 400 }); }
   if (!b.id || !UUID.test(b.id) || !b.deleteToken) return NextResponse.json({ error: "invalid" }, { status: 400 });
   const c = db(); if (!c) return NextResponse.json({ ok: true });
-  const { error, count } = await c.from("runs").delete({ count: "exact" }).eq("id", b.id).eq("delete_token_hash", sha(b.deleteToken));
-  if (error || !count) return NextResponse.json({ error: "not found" }, { status: 404 });
+  const { data, error } = await c.rpc("remove_run", { p_id: b.id, p_token_hash: sha(b.deleteToken) });
+  if (error || data !== true) return NextResponse.json({ error: "not found" }, { status: 404 });
   return NextResponse.json({ ok: true });
 }
